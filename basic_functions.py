@@ -3,12 +3,23 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import sympy as sp
 from sympy.utilities.lambdify import lambdify
+from skyfield.api import load
+
 
 # Constants
 mu = 398600  # Earth's gravitational parameter, km^3/s^2
 J2 = 0.00108263
 Re = 6378.1  # Earth's radius in km
 g0 = 9.80665  # m/s^2
+
+#This is the skyfield implementation
+ts = load.timescale()
+eph = load('de440s.bsp')
+earth = eph['Earth']
+sun = eph['Sun']
+moon = eph['Moon']
+ts = load.timescale()
+
 
 # === Helper Functions ===
 
@@ -125,11 +136,10 @@ def switch_ustar(l_vec, x_vec):
 
     #U_star
     u_star=-(B.T@l_vec)/norm
-    #switch function
-    switch=norm-1
-    return u_star,switch
 
-def mee_to_rv(p, f, g, h, k, L, mu):
+    return u_star 
+
+def mee_to_rv( x , mu):
     """
     Converts Modified Equinoctial Elements to position and velocity vectors.
     
@@ -143,6 +153,7 @@ def mee_to_rv(p, f, g, h, k, L, mu):
     - r_vec: position vector (3,)
     - v_vec: velocity vector (3,)
     """
+    p, f, g, h, k, L = x
     cosL = np.cos(L)
     sinL = np.sin(L)
 
@@ -204,15 +215,104 @@ def sigmoid_throttle(l_vec, x_vec):
     return 0.5 * (1 + np.sign(S))
 
 
-def eom_mee_with_perturbations(x ,l_vec, u_vec, thrust_mag, mass, isp):
+def eom_mee_with_perturbations(x ,l_vec, u_vec, thrust_mag, mass, isp , jd, mu):
     B = compute_perturbation_matrix(x , mu)
     aJ2 = compute_J2_acceleration(x , mu)
+
+    r_perturbingbody_s = sun.at(ts.ut1_jd(jd)).position.km
+    r_perturbingbody_m = moon.at(ts.ut1_jd(jd)).position.km
+
+    r_target , v_target = mee_to_rv(x, mu)
+
+    t_m = third_body(r_target,r_perturbingbody_m,mu)
+    t_s = third_body(r_target,r_perturbingbody_s,mu)
+    t= t_m +t_s
+
+    Q = rotation_mat(r_target , v_target)
+    a_3b = Q.T @ t
+    a = aJ2 + a_3b
     A = compute_A_vector(x , mu)
     c = isp * g0 / 1000  # km/s
     delta = sigmoid_throttle[l_vec,x]
     a_thrust = (thrust_mag * delta / mass) * u_vec
-    dx = A + B @ aJ2 + B @ a_thrust
+    dx = A + B @ a + B @ a_thrust
     dm = -thrust_mag * delta / c
-    return dx, dm
+    return dx, dm , a
 
 
+
+def convert_cartesian_to_modified_equinoctial(state_cartesian, mu):
+    position = state_cartesian[0:3, :]
+    velocity = state_cartesian[3:6, :]
+
+    radius = np.linalg.norm(position, axis=0)
+    h_vec = np.cross(position.T, velocity.T).T
+    h_mag = np.linalg.norm(h_vec, axis=0)
+    radial_velocity = np.sum(position * velocity, axis=0) / radius
+
+
+    r_hat = position / radius
+    v_hat = (radius * velocity - radial_velocity * position) / h_mag
+    h_hat = h_vec / h_mag
+
+    # Eccentricity vector
+    ecc_vec = np.cross(velocity.T, h_vec.T).T / mu - r_hat
+
+    # p element
+    p = h_mag ** 2 / mu
+
+    # h and k elements
+    denom = 1 + h_hat[2, :]
+    k = h_hat[0, :] / denom
+    h = -h_hat[1, :] / denom
+
+    # Equinoctial frame unit vectors
+    denom_eq = 1 + k**2 + h**2
+    f_hat = np.vstack([
+        1 - k**2 + h**2,
+        2 * k * h,
+        -2 * k
+    ]) / denom_eq
+
+    g_hat = np.vstack([
+        2 * k * h,
+        1 + k**2 - h**2,
+        2 * h
+    ]) / denom_eq
+
+    # f and g elements
+    f_elem = np.sum(ecc_vec * f_hat, axis=0)
+    g_elem = np.sum(ecc_vec * g_hat, axis=0)
+
+    # L element
+    cosl = r_hat[0, :] + v_hat[1, :]
+    sinl = r_hat[1, :] - v_hat[0, :]
+    L = np.arctan2(sinl, cosl)
+
+    return np.vstack([p, f_elem, g_elem, h, k, L])
+
+
+def dynamics(t, vec):
+    p, f, g, h, k, l, m = vec[:7]
+    l_p, l_f, l_g, l_h, l_k, l_l, l_m = vec[7:]
+
+    jd = t
+
+    l_vec = np.array([l_p, l_f, l_g, l_h, l_k, l_l])
+    x_vec = np.array([p, f, g, h, k, l])
+
+    u_opt = switch_ustar(l_vec, x_vec)
+    delta = sigmoid_throttle(l_vec, x_vec)
+
+    dx , dm , acc = eom_mee_with_perturbations(x_vec ,l_vec, u_opt, thrust_mag, m , isp  , jd , mu)
+
+    dot_p, dot_f, dot_g, dot_h, dot_k, dot_l=dx
+    dot_m = dm
+    
+    ode_func = get_costate_dynamics_func()
+
+    dlam = ode_func(x_vec, m , l_vec , l_m , u_opt , acc , delta ,mu)
+
+    dot_l_p, dot_l_f, dot_l_g, dot_l_h, dot_l_k, dot_l_l, dot_l_m = dlam
+
+    return [dot_p, dot_f, dot_g, dot_h, dot_k, dot_l, dot_m, dot_l_p, dot_l_f, dot_l_g, dot_l_h, dot_l_k, dot_l_l, dot_l_m]
