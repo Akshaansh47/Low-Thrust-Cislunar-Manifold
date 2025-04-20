@@ -1,3 +1,4 @@
+import spiceypy as sp
 from skyfield.api import load
 import numpy as np
 
@@ -14,9 +15,13 @@ earthp = earth.at(ts.ut1_jd(jd)).position.km
 sunp = sun.at(ts.ut1_jd(jd)).position.km
 moonp = moon.at(ts.ut1_jd(jd)).position.km
 
+earthp = earth.at(ts.ut1_jd(jd)).velocity.km_per_s
+sunp = sun.at(ts.ut1_jd(jd)).velocity.km_per_s
+moonp = moon.at(ts.ut1_jd(jd)).velocity.km_per_s
+
 
 print(earthp-moonp)
 print(sunp)
-#print(moonp)
+print(moonp)
 
-print(np.linalg.norm(earthp-moonp))
+#print(np.linalg.norm(earthp-moonp))
