@@ -15,9 +15,9 @@ earthp = earth.at(ts.ut1_jd(jd)).position.km
 sunp = sun.at(ts.ut1_jd(jd)).position.km
 moonp = moon.at(ts.ut1_jd(jd)).position.km
 
-earthp = earth.at(ts.ut1_jd(jd)).velocity.km_per_s
-sunp = sun.at(ts.ut1_jd(jd)).velocity.km_per_s
-moonp = moon.at(ts.ut1_jd(jd)).velocity.km_per_s
+earthv = earth.at(ts.ut1_jd(jd)).velocity.km_per_s
+sunv = sun.at(ts.ut1_jd(jd)).velocity.km_per_s
+moonv = moon.at(ts.ut1_jd(jd)).velocity.km_per_s
 
 
 print(earthp-moonp)
