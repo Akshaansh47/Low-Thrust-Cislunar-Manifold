@@ -8,6 +8,9 @@ from skyfield.api import load
 
 # Constants
 mu = 398600  # Earth's gravitational parameter, km^3/s^2
+mu_sun = 1.32712440018*(10**11)  # Sun's gravitational parameter, km^3/s^2
+mu_moon = 4902.8001  # Moon's gravitational parameter, km^3/s^2
+
 J2 = 0.00108263
 Re = 6378.1  # Earth's radius in km
 g0 = 9.80665  # m/s^2
@@ -242,13 +245,18 @@ def eom_mee_with_perturbations(x ,l_vec, u_vec, thrust_mag, mass, isp , jd, mu):
     B = compute_perturbation_matrix(x , mu)
     aJ2 = compute_J2_acceleration(x , mu)
 
+
+
+    r_target , v_target = mee_to_rv(x_vec, mu)
+
     r_perturbingbody_s = sun.at(ts.ut1_jd(jd)).position.km
     r_perturbingbody_m = moon.at(ts.ut1_jd(jd)).position.km
+    r_perturbingbody_e = earth.at(ts.ut1_jd(jd)).position.km
+    r_perturbingbody_srt = - r_perturbingbody_e + r_perturbingbody_s
+    r_perturbingbody_mrt = r_perturbingbody_m - r_perturbingbody_e
 
-    r_target , v_target = mee_to_rv(x, mu)
-
-    t_m = third_body(r_target,r_perturbingbody_m,mu)
-    t_s = third_body(r_target,r_perturbingbody_s,mu)
+    t_m = third_body(r_target,r_perturbingbody_mrt,mu_moon)
+    t_s = third_body(r_target,r_perturbingbody_srt,mu_sun)
     t= t_m +t_s
 
     Q = rotation_mat(r_target , v_target)
@@ -368,13 +376,16 @@ def single_shooting(para):
     jd= sol.t[-1]
     aJ2 = compute_J2_acceleration(x_vec , mu)
 
-    r_perturbingbody_s = sun.at(ts.ut1_jd(jd)).position.km
-    r_perturbingbody_m = moon.at(ts.ut1_jd(jd)).position.km
-
     r_target , v_target = mee_to_rv(x_vec, mu)
 
-    t_m = third_body(r_target,r_perturbingbody_m,mu)
-    t_s = third_body(r_target,r_perturbingbody_s,mu)
+    r_perturbingbody_s = sun.at(ts.ut1_jd(jd)).position.km
+    r_perturbingbody_m = moon.at(ts.ut1_jd(jd)).position.km
+    r_perturbingbody_e = earth.at(ts.ut1_jd(jd)).position.km
+    r_perturbingbody_srt = - r_perturbingbody_e + r_perturbingbody_s
+    r_perturbingbody_mrt = r_perturbingbody_m - r_perturbingbody_e
+
+    t_m = third_body(r_target,r_perturbingbody_mrt,mu_moon)
+    t_s = third_body(r_target,r_perturbingbody_srt,mu_sun)
     t= t_m +t_s
 
     Q = rotation_mat(r_target , v_target)
