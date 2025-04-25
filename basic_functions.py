@@ -4,12 +4,21 @@ import matplotlib.pyplot as plt
 import sympy as sp
 from sympy.utilities.lambdify import lambdify
 from skyfield.api import load
+from scipy.integrate import solve_ivp
+from scipy.optimize import fsolve
+
+
 
 
 # Constants
-mu = 398600  # Earth's gravitational parameter, km^3/s^2
+mu = 398600.435436096 # Earth's gravitational parameter, km^3/s^2
 mu_sun = 1.32712440018*(10**11)  # Sun's gravitational parameter, km^3/s^2
 mu_moon = 4902.8001  # Moon's gravitational parameter, km^3/s^2
+
+thrust_mag = 0.235
+isp = 4155
+
+c = c = isp * 9.81/1000 # Exhaust velocity
 
 J2 = 0.00108263
 Re = 6378.1  # Earth's radius in km
@@ -26,26 +35,26 @@ ts = load.timescale()
 
 # === Helper Functions ===
 
-def Hamiltonian(x_vec, lam ,l_m, m , a, T , c):
+def Hamiltonian(x_vec, lam ,l_m, m , a, T , c, mu):
     p, f, g, h, k, L = x_vec
-    delta = sigmoid_throttle(lam, x_vec)
+    delta = sigmoid_throttle(lam, x_vec, mu)
     u = switch_ustar(lam, x_vec)
 
-    q = 1 + f * sp.cos(L) + g * sp.sin(L)
-    s = sp.sqrt(1 + h**2 + k**2)
+    q = 1 + f * np.cos(L) + g * np.sin(L)
+    s = np.sqrt(1 + h**2 + k**2)
 
-    A = sp.Matrix([0, 0, 0, 0, 0, sp.sqrt(mu * p) * (q / p)**2])    
+    A = np.array([0, 0, 0, 0, 0, np.sqrt(mu * p) * (q / p)**2])    
 
-    B = (1 / q) * sp.sqrt(p / mu) * sp.array([
+    B = (1 / q) * np.sqrt(p / mu) * np.array([
         [0, 2 * p, 0],
-        [q * sp.sin(L), (q + 1) * sp.cos(L) + f, -g * (h * sp.sin(L) - k * sp.cos(L))],
-        [-q * sp.cos(L), (q + 1) * sp.sin(L) + g, f * (h * sp.sin(L) - k * sp.cos(L))],
-        [0, 0, s * sp.cos(L) / 2],
-        [0, 0, s * sp.sin(L) / 2],
-        [0, 0, (h * sp.sin(L) - k * sp.cos(L))]
+        [q * np.sin(L), (q + 1) * np.cos(L) + f, -g * (h * np.sin(L) - k * np.cos(L))],
+        [-q * np.cos(L), (q + 1) * np.sin(L) + g, f * (h * np.sin(L) - k * np.cos(L))],
+        [0, 0, s * np.cos(L) / 2],
+        [0, 0, s * np.sin(L) / 2],
+        [0, 0, (h * np.sin(L) - k * np.cos(L))]
     ])
 
-    H = 1 + lam.dot(A + B @ a + delta * (T / m) * B @ u ) - l_m * delta * (T / c)
+    H = 1 + np.dot(lam,(A + B @ a + delta * (T / m) * B @ u )) - l_m * delta * (T / c)
 
     return H
 
@@ -69,7 +78,7 @@ def derive_costate_equations():
 
     A = sp.Matrix([0, 0, 0, 0, 0, sp.sqrt(mu * p) * (q / p)**2])    
 
-    B = (1 / q) * sp.sqrt(p / mu) * sp.array([
+    B = (1 / q) * sp.sqrt(p / mu) * sp.Matrix([
         [0, 2 * p, 0],
         [q * sp.sin(L), (q + 1) * sp.cos(L) + f, -g * (h * sp.sin(L) - k * sp.cos(L))],
         [-q * sp.cos(L), (q + 1) * sp.sin(L) + g, f * (h * sp.sin(L) - k * sp.cos(L))],
@@ -81,7 +90,7 @@ def derive_costate_equations():
     H = 1 + lam.dot(A + B @ a + delta * (T / m) * B @ u ) - l_m * delta * (T / c)
 
     # Costate equations: λ̇ = -∂H/∂x
-    costate_odes = -H.jacobian(x)
+    costate_odes = -sp.Matrix([sp.diff(H, var) for var in x])
 
     #Add costate equation for l_m: l̇_m = -∂H/∂m
     l_m_dot = -sp.diff(H, m)
@@ -90,11 +99,10 @@ def derive_costate_equations():
     full_costate_odes = sp.Matrix([costate_odes, l_m_dot])
 
 
-    return x, lam, m, l_m, u, a, full_costate_odes
-
+    return x, lam, m, l_m, u, a, T ,full_costate_odes
 
 def get_costate_dynamics_func():
-    x, lam, m, l_m, u, a, costate_odes = derive_costate_equations()
+    x, lam, m, l_m, u, a, T ,costate_odes = derive_costate_equations()
     
     # Flatten input variables
     state_vars = x
@@ -103,14 +111,13 @@ def get_costate_dynamics_func():
     acc_var = a
     mass = m
     l_mass = l_m
+    Thrust = T
     delta = sp.Symbol('delta')
     mu = sp.Symbol('mu')  
 
     # Create a numerical function
-    ode_func = lambdify((state_vars, mass, costate_vars, l_m, control_vars, acc_var, delta, mu), costate_odes, 'numpy')
+    ode_func = lambdify((state_vars, mass, costate_vars, l_mass, control_vars, acc_var, delta, mu, T), costate_odes, 'numpy')
     return ode_func
-
-
 
 
 def compute_perturbation_matrix(x , mu):
@@ -130,7 +137,7 @@ def compute_perturbation_matrix(x , mu):
 def compute_J2_acceleration(x , mu):
     p, f, g, h, k, L = x
     q = 1 + f * np.cos(L) + g * np.sin(L)
-    r_vec , v_vec = mee_to_rv(p, f, g, h, k, L, mu)
+    r_vec , v_vec = mee_to_rv(x, mu)
     r = np.linalg.norm(r_vec)
     C1 = mu * J2 * Re**2 / r**4
     C2 = h * np.sin(L) - k * np.cos(L)
@@ -204,7 +211,6 @@ def mee_to_rv( x , mu):
     
     return r_vec, v_vec
 
-
 def rotation_mat(r , v):
     i_r = r/(np.linalg.norm(r))
     h = np.cross(r , v)
@@ -213,7 +219,6 @@ def rotation_mat(r , v):
     Q = np.vstack([i_r, i_t, i_n])
 
     return Q
-
 
 def third_body(r_target,r_perturbingbody,mu):
     
@@ -224,8 +229,7 @@ def third_body(r_target,r_perturbingbody,mu):
     t = -(mu / (rel_r_norm**3)) * (r_target + F * r_perturbingbody)
     return t
 
-
-def sigmoid_throttle(l_vec, x_vec):
+def sigmoid_throttle(l_vec, x_vec, mu):
     """
     Sigmoid throttle function
     
@@ -236,10 +240,9 @@ def sigmoid_throttle(l_vec, x_vec):
     Returns:
     Throttle value between 0 and 1
     """
-    B=compute_perturbation_matrix(x_vec)
+    B=compute_perturbation_matrix(x_vec,mu)
     S= np.linalg.norm(B.T@l_vec)
     return 0.5 * (1 + np.sign(S))
-
 
 def eom_mee_with_perturbations(x ,l_vec, u_vec, thrust_mag, mass, isp , jd, mu):
     B = compute_perturbation_matrix(x , mu)
@@ -247,7 +250,7 @@ def eom_mee_with_perturbations(x ,l_vec, u_vec, thrust_mag, mass, isp , jd, mu):
 
 
 
-    r_target , v_target = mee_to_rv(x_vec, mu)
+    r_target , v_target = mee_to_rv(x, mu)
 
     r_perturbingbody_s = sun.at(ts.ut1_jd(jd)).position.km
     r_perturbingbody_m = moon.at(ts.ut1_jd(jd)).position.km
@@ -264,13 +267,11 @@ def eom_mee_with_perturbations(x ,l_vec, u_vec, thrust_mag, mass, isp , jd, mu):
     a = aJ2 + a_3b
     A = compute_A_vector(x , mu)
     c = isp * g0 / 1000  # km/s
-    delta = sigmoid_throttle[l_vec,x]
+    delta = sigmoid_throttle(l_vec,x,mu)
     a_thrust = (thrust_mag * delta / mass) * u_vec
     dx = A + B @ a + B @ a_thrust
     dm = -thrust_mag * delta / c
     return dx, dm , a
-
-
 
 def convert_cartesian_to_modified_equinoctial(state_cartesian, mu):
     position = state_cartesian[0:3, :]
@@ -323,10 +324,7 @@ def convert_cartesian_to_modified_equinoctial(state_cartesian, mu):
     return np.vstack([p, f_elem, g_elem, h, k, L])
 
 
-
-
-
-def dynamics(t, vec):
+def dynamics(t, vec , ode_func):
     p, f, g, h, k, l, m = vec[:7]
     l_p, l_f, l_g, l_h, l_k, l_l, l_m = vec[7:]
 
@@ -336,16 +334,16 @@ def dynamics(t, vec):
     x_vec = np.array([p, f, g, h, k, l])
 
     u_opt = switch_ustar(l_vec, x_vec)
-    delta = sigmoid_throttle(l_vec, x_vec)
+    delta = sigmoid_throttle(l_vec, x_vec, mu)
 
     dx , dm , acc = eom_mee_with_perturbations(x_vec ,l_vec, u_opt, thrust_mag , m , isp  , jd , mu)
 
     dot_p, dot_f, dot_g, dot_h, dot_k, dot_l=dx
     dot_m = dm
     
-    ode_func = get_costate_dynamics_func()
+    dlam = ode_func(x_vec, m , l_vec , l_m , u_opt , acc , delta ,mu, thrust_mag)
 
-    dlam = ode_func(x_vec, m , l_vec , l_m , u_opt , acc , delta ,mu)
+    dlam = np.array(dlam).flatten()
 
     dot_l_p, dot_l_f, dot_l_g, dot_l_h, dot_l_k, dot_l_l, dot_l_m = dlam
 
@@ -354,23 +352,33 @@ def dynamics(t, vec):
 
 
 def single_shooting(para):
-    
-    l_p0, l_f0, l_g0, l_h0, l_k0, l_l0, l_m0 = para[:7]
+    p , f , g , h , k , l ,m = 42164,0,0,0,0,0,500
+    #l_p0, l_f0, l_g0, l_h0, l_k0, l_l0, l_m0 = para[7:14]
+    #t_seg = para[14]
+    l_p0, l_f0, l_g0, l_h0, l_k0, l_l0 = para[:6]
+    l_m0 = para[6]
     t_seg = para[7]
+    p_f , f_f , g_f , h_f , k_f , l_f = 190971.941319164,	0.380248267433124,	-0.00612969611643008,	0.0753952145926258,	-0.0234393284840843,	33.8032581970921
+
+    t_start = 2459843.479764
+
+    #print()
 
     # Initial state for first segment
     initial_state_seg = [ p , f , g , h , k , l , m, 
                           l_p0, l_f0, l_g0, l_h0, l_k0, l_l0, l_m0]
     
-    t_span1 = np.linspace(0, t_seg, 1000)
-    sol = solve_ivp(lambda t, y: ode_system(t, y), [0, t_seg], 
+    ode_func = get_costate_dynamics_func()
+    
+    t_span1 = np.linspace(t_start, t_start + t_seg, 1000)
+    sol = solve_ivp(lambda t, y: dynamics(t, y, ode_func), [t_start, t_start+t_seg], 
                      initial_state_seg, method='RK45', t_eval=t_span1, rtol = 1e-10, atol = 1e-10)
+    
     
     x_vec = [sol.y[0,-1], sol.y[1,-1], sol.y[2,-1], sol.y[3,-1], sol.y[4,-1], sol.y[5,-1] ]
     l_vec = [sol.y[7,-1], sol.y[8,-1], sol.y[9,-1], sol.y[10,-1], sol.y[11,-1], sol.y[12,-1] ]
     l_m = sol.y[6,-1]
     m = sol.y[13,-1]
-
     
     #for acc
     jd= sol.t[-1]
@@ -392,22 +400,26 @@ def single_shooting(para):
     a_3b = Q.T @ t
     acc = aJ2 + a_3b
 
-    Haml = Hamiltonian(x_vec, l_vec, l_m, m, acc, T, c)
+    Haml = Hamiltonian(x_vec, l_vec, l_m, m, acc, thrust_mag, c, mu)
 
     constraints = [ 
         # final state  constraints (6 equations)
-        sol.y[0,-1] - p_f,
-        sol.y[1,-1] - f_f,
-        sol.y[2,-1] - g_f,
-        sol.y[3,-1] - h_f,
-        sol.y[4,-1] - k_f,
-        sol.y[5,-1] - l_f,
+        (sol.y[0,-1] - p_f),
+        (sol.y[1,-1] - f_f),
+        (sol.y[2,-1] - g_f),
+        (sol.y[3,-1] - h_f),
+        (sol.y[4,-1] - k_f),
+        (sol.y[5,-1] - l_f),
 
         #lamda_m(tf) = 0
-        sol,y[13,-1],
+        sol.y[13,-1],
         #hamiltonian = 0
         Haml
 
     ]
+
+    print(constraints)
+
+    
 
     return constraints
